@@ -8,7 +8,6 @@
 enum ECacheAlgorithm {
     Lru,
     Lfu,
-    Arc,
     TwoQ,
     Lirs,
     Ideal,

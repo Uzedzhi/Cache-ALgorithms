@@ -41,7 +41,6 @@ ECacheAlgorithm ParseCacheAlgorithm(std::string_view AlgorithmName) {
     switch (FNV1A_HashUpperCase(AlgorithmName)) {
         case FNV1A_Hash("LRU"):     return ECacheAlgorithm::Lru;
         case FNV1A_Hash("LFU"):     return ECacheAlgorithm::Lfu;
-        case FNV1A_Hash("ARC"):     return ECacheAlgorithm::Arc;
         case FNV1A_Hash("LIRS"):    return ECacheAlgorithm::Lirs;
 
         case FNV1A_Hash("2Q"):
@@ -52,16 +51,10 @@ ECacheAlgorithm ParseCacheAlgorithm(std::string_view AlgorithmName) {
 }
 
 std::string_view CacheAlgorithmToString(ECacheAlgorithm Algorithm) {
-    // Размер таблицы завязан на ECacheAlgorithm::Unknown: если в enum
-    // добавят алгоритм и забудут имя здесь — не соберётся.
     static constexpr std::array<
         std::string_view,
         static_cast<std::size_t>(ECacheAlgorithm::Unknown)
-    > CacheAlgorithmNames = {"LRU", "LFU", "ARC", "2Q", "LIRS", "IDEAL"};
+    > CacheAlgorithmNames = {"LRU", "LFU", "2Q", "LIRS", "IDEAL"};
 
-    std::size_t Index = static_cast<std::size_t>(Algorithm);
-    if (Index >= CacheAlgorithmNames.size())
-        return "UNKNOWN";
-
-    return CacheAlgorithmNames[Index];
+    return CacheAlgorithmNames[static_cast<std::size_t>(Algorithm)];
 }

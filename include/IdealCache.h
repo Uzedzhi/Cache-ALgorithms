@@ -63,31 +63,33 @@ public:
         // Текущее обращение "потребляет" ближайшее известное вхождение
         // этого ключа — дальше для него актуальны только будущие позиции.
         auto& OwnFutureUses = FutureOccurrences_[Key];
-        if (!OwnFutureUses.empty() && OwnFutureUses.front() <= CurrentPosition_) {
+        if (!OwnFutureUses.empty() && OwnFutureUses.front() <= CurrentPosition_)
             OwnFutureUses.pop_front();
-        }
-        const std::size_t NewNextUse = OwnFutureUses.empty() ? kNeverAgain : OwnFutureUses.front();
 
-        const auto ResidentIt = this->Entries_.find(Key);
-        if (ResidentIt != this->Entries_.end()) {
-            // Хит: ключ остаётся резидентным, просто обновляем его позицию
-            // в упорядоченном множестве под новое ближайшее использование.
-            OrderedByNextUse_.erase({ResidentIt->second.NextUse, Key});
+        const std::size_t NewNextUse = OwnFutureUses.empty() ? kNeverAgain : OwnFutureUses.front();
+        const auto FoundIt = Entries_.find(Key);
+        if (FoundIt != Entries_.end()) {
+            OrderedByNextUse_.erase({FoundIt->second.NextUse, Key});
             OrderedByNextUse_.insert({NewNextUse, Key});
-            ResidentIt->second.NextUse = NewNextUse;
+            FoundIt->second.NextUse = NewNextUse;
             return Result;
         }
 
-        if (this->Entries_.size() >= this->Capacity_) {
+        if (Entries_.size() >= this->Capacity_) {
             const auto VictimIt = std::prev(OrderedByNextUse_.end());
+            if (VictimIt->first <= NewNextUse) {
+                Result.WasEvicted = true;
+                Result.EvictedKey = Key;
+                return Result;
+            }
             const KeyType VictimKey = VictimIt->second;
             OrderedByNextUse_.erase(VictimIt);
-            this->Entries_.erase(VictimKey);
+            Entries_.erase(VictimKey);
             Result.WasEvicted = true;
             Result.EvictedKey = VictimKey;
         }
 
-        this->Entries_[Key] = SIdealEntry{NewNextUse};
+        Entries_[Key] = SIdealEntry{NewNextUse};
         OrderedByNextUse_.insert({NewNextUse, Key});
         return Result;
     }

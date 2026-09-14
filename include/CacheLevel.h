@@ -46,20 +46,10 @@ struct SCacheEviction {
 template <typename KeyType>
 class TCacheLevelBase {
 public:
-    // bool Contains(const KeyType& Key) const {
-    //     const auto FoundEl = Entries_.find(Key);
-    //     return FoundEl != Entries_.end() && FoundEl->second.IsResident();
-    // }
-
     std::size_t GetCapacity()      const { return Capacity_; }
     ECacheAlgorithm GetAlgorithm() const { return Algorithm_; }
 
 protected:
-    // using TEntryMap = std::unordered_map<KeyType, EntryType>;
-    // using TEntryIt  = typename TEntryMap::iterator;
-    // using TResult   = SCacheEviction<KeyType>;
-
-    // TEntryMap &GetEntries() { return Entries_; }
     TCacheLevelBase(ECacheAlgorithm Algorithm, std::size_t Capacity)
         : Algorithm_(Algorithm), Capacity_(Capacity) {
         CHECK_EX(Capacity_ != 0, std::invalid_argument,
@@ -71,5 +61,4 @@ protected:
 
     ECacheAlgorithm Algorithm_;
     std::size_t Capacity_;
-    // TEntryMap Entries_;
 };

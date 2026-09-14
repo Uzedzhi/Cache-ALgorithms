@@ -8,7 +8,6 @@
 #include "CacheLevel.h"
 #include "LruCache.h"
 #include "LfuCache.h"
-#include "ArcCache.h"
 #include "TwoQCache.h"
 #include "LirsCache.h"
 #include "IdealCache.h"
@@ -26,7 +25,6 @@ template <typename KeyType>
 using TCacheLevel = std::variant<
     TLruCache<KeyType>,
     TLfuCache<KeyType>,
-    TArcCache<KeyType>,
     TTwoQCache<KeyType>,
     TLirsCache<KeyType>,
     TIdealCache<KeyType>>;
@@ -40,7 +38,6 @@ TCacheLevel<KeyType> MakeCacheLevel(const SCacheLevelConfig& Config,
     switch (Config.Algorithm) {
         case ECacheAlgorithm::Lru:   return TLruCache<KeyType>(Config.Capacity);
         case ECacheAlgorithm::Lfu:   return TLfuCache<KeyType>(Config.Capacity);
-        case ECacheAlgorithm::Arc:   return TArcCache<KeyType>(Config.Capacity);
         case ECacheAlgorithm::TwoQ:  return TTwoQCache<KeyType>(Config.Capacity);
         case ECacheAlgorithm::Lirs:  return TLirsCache<KeyType>(Config.Capacity);
         case ECacheAlgorithm::Ideal: return TIdealCache<KeyType>(Config.Capacity, DataStream);
