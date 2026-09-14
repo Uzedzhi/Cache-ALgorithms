@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cerrno>
 #include <deque>
 #include <limits>
 #include <set>
@@ -7,13 +8,12 @@
 #include <vector>
 
 #include "CacheLevel.h"
+#include "CacheTypes.h"
 
 // Запись идеального кеша: позиция ближайшего будущего обращения к ключу.
 // Призрачных записей нет — в таблице лежат только резиденты.
 struct SIdealEntry {
     std::size_t NextUse = 0;
-
-    bool IsResident() const { return true; }
 };
 
 // Идеальный кеш (алгоритм Белади / MIN): на каждом промахе вытесняет тот
@@ -37,13 +37,24 @@ struct SIdealEntry {
 // что автоматически ставит такой ключ в конец множества (самый выгодный
 // кандидат на вытеснение), без отдельного разбора случаев.
 template <typename KeyType>
-class TIdealCache : public TCacheLevelBase<KeyType, SIdealEntry> {
+class TIdealCache : public TCacheLevelBase<KeyType> {
+    static constexpr std::size_t kNeverAgain = std::numeric_limits<std::size_t>::max();
+    std::size_t CurrentPosition_ = 0;
+
+    std::set<std::pair<std::size_t, KeyType>>               OrderedByNextUse_;
+    std::unordered_map<KeyType, std::deque<std::size_t>>    FutureOccurrences_;
+    std::unordered_map<KeyType, SIdealEntry>                Entries_;
+    
 public:
     TIdealCache(std::size_t Capacity, const std::vector<KeyType>& DataStream)
-        : TCacheLevelBase<KeyType, SIdealEntry>(ECacheAlgorithm::Ideal, Capacity) {
+        : TCacheLevelBase<KeyType>(ECacheAlgorithm::Ideal, Capacity) {
         for (std::size_t Index = 0; Index < DataStream.size(); ++Index) {
             FutureOccurrences_[DataStream[Index]].push_back(Index);
         }
+    }
+
+    bool Contains(const KeyType& Key) const {
+        return Entries_.find(Key) != Entries_.end();
     }
 
     SCacheEviction<KeyType> Insert(const KeyType& Key) {
@@ -84,12 +95,4 @@ public:
     void NotifyStreamPosition(std::size_t CurrentPosition) {
         CurrentPosition_ = CurrentPosition;
     }
-
-private:
-    static constexpr std::size_t kNeverAgain = std::numeric_limits<std::size_t>::max();
-
-    std::size_t CurrentPosition_ = 0;
-
-    std::set<std::pair<std::size_t, KeyType>> OrderedByNextUse_;
-    std::unordered_map<KeyType, std::deque<std::size_t>> FutureOccurrences_;
 };

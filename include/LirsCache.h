@@ -1,229 +1,268 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <list>
+#include <stdexcept>
 #include <unordered_map>
 
 #include "CacheLevel.h"
 
-// Запись LIRS. В отличие от ARC/2Q "призрачность" тут не позиция в списке,
-// а отдельный флаг: нерезидентный HIR-ключ продолжает жить в стеке S как
-// история, но данных за ним уже нет.
+// Запись LIRS. "Призрачность" тут не позиция в списке, а флаг Resident:
+// нерезидентный HIR-ключ продолжает жить в стеке S как история обращений,
+// но данных за ним уже нет.
+//
+// Инвариант, который обязаны поддерживать все методы: InStack/InQueue
+// строго соответствуют фактическому членству ключа в Stack_/QueueList_,
+// а StackPos/QueuePos валидны ровно тогда, когда соответствующий флаг true.
+// Поэтому поля здесь нельзя перезаписывать агрегатной инициализацией —
+// это молча сбросит флаги, оставив узлы в списках.
 template <typename KeyType>
 struct SLirsEntry {
-    bool IsLIR = false;
+    bool IsLIR    = false;
     bool Resident = false;
+    bool InStack  = false;
+    bool InQueue  = false;
 
-    bool IsResident() const { return Resident; }
+    typename std::list<KeyType>::iterator QueuePos;
+    typename std::list<KeyType>::iterator StackPos;
 };
 
 // LIRS — использует межпосещенческую близость (IRR, Inter-Reference
 // Recency) вместо простой хронологии обращений. Все замеченные ключи
 // делятся на:
-//   LIR (Low IRR) — "элитные", всегда резидентные, их L штук максимум;
-//   HIR (High IRR) — обычные; резидентными могут быть лишь Hirs штук,
+//   LIR (Low IRR) — "элитные", всегда резидентные, их LirsCapacity_ максимум;
+//   HIR (High IRR) — обычные; резидентными могут быть лишь HirsCapacity_ штук,
 //                    остальные HIR помнятся как "история" в стеке S.
 // Структуры:
-//   S — стек recency-истории (и LIR, и HIR, резидентных и нет); особый
-//       инвариант — после каждой операции низ стека "подрезается" так,
-//       чтобы там всегда лежал LIR-блок (стековая подрезка).
-//   Q — очередь резидентных HIR-блоков, используется для выбора жертвы.
+//   S — стек recency-истории (и LIR, и HIR, резидентные и нет). Голова списка
+//       это вершина стека (самое свежее), хвост — дно (самое старое).
+//       Инвариант: на дне всегда LIR-блок, что и обеспечивает подрезка.
+//       Именно этот инвариант превращает проверку "ключ лежит в S"
+//       в сравнение его IRR с порогом — числа IRR нигде не хранятся.
+//   Q — очередь резидентных HIR-блоков. Голова — самый свежий,
+//       хвост — жертва.
 // Реализация — переложение алгоритма из статьи Jiang & Zhang,
 // "LIRS: An Efficient Low Inter-reference Recency Set Replacement
 // Policy" (SIGMETRICS 2002).
 template <typename KeyType>
-class TLirsCache : public TCacheLevelBase<KeyType, SLirsEntry<KeyType>> {
+class TLirsCache : public TCacheLevelBase<KeyType> {
+    using TResult = SCacheEviction<KeyType>;
+    using TMap    = typename std::unordered_map<KeyType, SLirsEntry<KeyType>>;
+
+    TMap Entries_;
+
+    std::size_t LirsCapacity_ = 0;
+    std::size_t HirsCapacity_ = 0;
+    std::size_t LirCount_     = 0;
+
+    std::list<KeyType> Stack_;
+    std::list<KeyType> QueueList_;
+
 public:
     explicit TLirsCache(std::size_t Capacity)
-        : TCacheLevelBase<KeyType, SLirsEntry<KeyType>>(ECacheAlgorithm::Lirs, Capacity) {
-        if (this->Capacity_ >= 2) {
-            HirsCapacity_ = std::max<std::size_t>(1, this->Capacity_ / 10);
-            HirsCapacity_ = std::min(HirsCapacity_, this->Capacity_ - 1);
-            LirsCapacity_ = this->Capacity_ - HirsCapacity_;
-        } else {
-            // Вырожденный случай ёмкости 1: честно поделить бюджет между
-            // LIR- и HIR-резидентной областью невозможно — одна из них
-            // неизбежно станет нулевой, и алгоритм вместо вытеснения
-            // резидента начнёт просто отказывать новым ключам в приёме.
-            // Это меняет саму модель кеша (сравнение с "идеальным"
-            // Белади предполагает обязательную замену на промахе), поэтому
-            // ёмкость 1 явно обрабатывается как тривиальный однослотовый
-            // кеш с обязательной заменой — см. bSingleSlotMode_.
-            bSingleSlotMode_ = true;
-            HirsCapacity_ = 0;
-            LirsCapacity_ = 0;
-        }
+        : TCacheLevelBase<KeyType>(ECacheAlgorithm::Lirs, Capacity) {
+        CHECK_EX(Capacity >= 3, std::invalid_argument, "Ошибка создания LIRS кеша: "
+                                                       "нельзя создать кеш с емкостью меньше 3");
+
+        // В статье под HIR-резидентов отводится ~1% ёмкости, но не меньше
+        // одного кадра: при HirsCapacity_ == 0 очередь вытесняла бы блок
+        // в тот же момент, когда он туда попал, и испытательного срока
+        // не существовало бы вовсе.
+        HirsCapacity_ = std::max<std::size_t>(1, Capacity / 100);
+        LirsCapacity_ = Capacity - HirsCapacity_;
+    }
+
+    bool Contains(const KeyType& Key) const {
+        const auto FoundEl = Entries_.find(Key);
+        return FoundEl != Entries_.end() && FoundEl->second.Resident;
     }
 
     SCacheEviction<KeyType> Insert(const KeyType& Key) {
-        if (bSingleSlotMode_) {
-            return InsertSingleSlot(Key);
-        }
+        const auto FoundIt = Entries_.find(Key);
+        const bool bKeyExists   = (FoundIt != Entries_.end());
+        const bool bKeyResident = bKeyExists && FoundIt->second.Resident;
 
-        auto InfoIt = this->Entries_.find(Key);
-        const bool bExists = (InfoIt != this->Entries_.end());
-        const bool bResident = bExists && InfoIt->second.Resident;
+        TResult Result;
 
-        if (bResident && InfoIt->second.IsLIR) {
+        if (bKeyResident && FoundIt->second.IsLIR) {
+            // Случай 1: попадание в LIR. Двигаем наверх; если блок был на дне,
+            // подрезка снимет оголившийся хвост из HIR-записей.
             MoveToStackTop(Key);
             PruneStack();
-            return {};
-        }
-
-        if (bResident && !InfoIt->second.IsLIR) {
-            const bool bInStack = StackIterators_.find(Key) != StackIterators_.end();
-            if (bInStack) {
-                return PromoteHirToLir(Key);
+        } else if (bKeyResident) {
+            // Случай 2: попадание в резидентный HIR. Читаем InStack ДО переноса
+            // наверх — после MoveToStackTop флаг всегда true и сигнал потерян.
+            if (FoundIt->second.InStack) {
+                Result = PromoteToLir(Key);
+            } else {
+                MoveToStackTop(Key);
+                TouchQueue(Key);
+                PruneStack();
             }
-            RemoveFromQueueIfPresent(Key);
-            QueueList_.push_front(Key);
-            QueueIterators_[Key] = QueueList_.begin();
-            MoveToStackTop(Key);
-            PruneStack();
-            return {};
+        } else if (bKeyExists && FoundIt->second.InStack) {
+            // Случай 3: промах по нерезиденту, но призрак в S уцелел —
+            // значит IRR мал, блок минует очередь и сразу становится LIR.
+            Result = PromoteToLir(Key);
+        } else {
+            // Случай 4: ключ неизвестен вовсе (либо призрак уже подрезан).
+            Result = InsertBrandNewKey(Key);
         }
-
-        const bool bHasHistory = bExists && StackIterators_.find(Key) != StackIterators_.end();
-        if (bHasHistory) {
-            return PromoteHirToLir(Key);
-        }
-        return InsertBrandNewKey(Key);
+        return Result;
     }
 
 private:
-    using TBase   = TCacheLevelBase<KeyType, SLirsEntry<KeyType>>;
-    using TResult = typename TBase::TResult;
+    // --- операции над списками; только они трогают флаги и итераторы ---
 
-    // Вырожденный режим ёмкости 1: в таблице всегда не больше одной записи,
-    // поэтому унаследованный Contains() работает без единой правки.
-    TResult InsertSingleSlot(const KeyType& Key) {
-        TResult Result;
-        if (this->Contains(Key)) {
-            return Result; // touch, вытеснять некого
-        }
-        if (!this->Entries_.empty()) {
-            Result.WasEvicted = true;
-            Result.EvictedKey = this->Entries_.begin()->first;
-            this->Entries_.clear();
-        }
-        this->Entries_[Key] = SLirsEntry<KeyType>{/*IsLIR=*/true, /*Resident=*/true};
-        return Result;
+    void PushToStackTop(typename TMap::iterator It, const KeyType& Key) {
+        Stack_.push_front(Key);
+        It->second.StackPos = Stack_.begin();
+        It->second.InStack  = true;
+    }
+
+    void RemoveFromStack(typename TMap::iterator It) {
+        if (!It->second.InStack)
+            return;
+        Stack_.erase(It->second.StackPos);
+        It->second.InStack = false;
     }
 
     void MoveToStackTop(const KeyType& Key) {
-        const auto It = StackIterators_.find(Key);
-        if (It != StackIterators_.end()) {
-            Stack_.erase(It->second);
-        }
-        Stack_.push_front(Key);
-        StackIterators_[Key] = Stack_.begin();
+        const auto It = Entries_.find(Key);
+        RemoveFromStack(It);
+        PushToStackTop(It, Key);
     }
 
-    void RemoveFromQueueIfPresent(const KeyType& Key) {
-        const auto It = QueueIterators_.find(Key);
-        if (It != QueueIterators_.end()) {
-            QueueList_.erase(It->second);
-            QueueIterators_.erase(It);
-        }
+    void PushToQueueFront(typename TMap::iterator It, const KeyType& Key) {
+        QueueList_.push_front(Key);
+        It->second.QueuePos = QueueList_.begin();
+        It->second.InQueue  = true;
     }
 
-    // Поддерживает инвариант "низ стека — всегда LIR-блок (или стек пуст)".
-    void PruneStack() {
-        while (!Stack_.empty()) {
-            const KeyType BackKey = Stack_.back();
-            const auto It = this->Entries_.find(BackKey);
-            const bool bBottomIsLir = (It != this->Entries_.end()) && It->second.IsLIR;
-            if (bBottomIsLir) {
-                break;
-            }
-
-            StackIterators_.erase(BackKey);
-            Stack_.pop_back();
-
-            if (It != this->Entries_.end() && !It->second.Resident) {
-                // Нерезидентный HIR без истории в стеке — забываем совсем,
-                // дальше он неотличим от "никогда не виденного" ключа.
-                this->Entries_.erase(It);
-            }
-        }
+    void RemoveFromQueueIfPresent(typename TMap::iterator It) {
+        if (!It->second.InQueue)
+            return;
+        QueueList_.erase(It->second.QueuePos);
+        It->second.InQueue = false;
     }
 
-    TResult DemoteStackBottomLirToHir() {
+    void TouchQueue(const KeyType& Key) {
+        const auto It = Entries_.find(Key);
+        RemoveFromQueueIfPresent(It);
+        PushToQueueFront(It, Key);
+    }
+
+    // Вытеснение хвоста очереди — единственное место во всём классе,
+    // где освобождаются данные. Подрезка стека память не освобождает.
+    TResult EvictQueueTail() {
         TResult Result;
-        if (Stack_.empty()) {
+        if (QueueList_.empty())
             return Result;
-        }
 
-        const KeyType VictimKey = Stack_.back();
-        StackIterators_.erase(VictimKey);
-        Stack_.pop_back();
+        const KeyType EvictedKey = QueueList_.back();
+        const auto EvictedIt = Entries_.find(EvictedKey);
 
-        this->Entries_[VictimKey] = SLirsEntry<KeyType>{/*IsLIR=*/false, /*Resident=*/true};
-        --LirCount_;
+        QueueList_.pop_back();
+        EvictedIt->second.InQueue  = false;
+        EvictedIt->second.Resident = false;
 
-        QueueList_.push_front(VictimKey);
-        QueueIterators_[VictimKey] = QueueList_.begin();
+        // Запись в S намеренно оставляем: она и есть призрак, по которому
+        // будет опознано повторное обращение.
+        if (!EvictedIt->second.InStack)
+            Entries_.erase(EvictedIt);
 
-        if (QueueList_.size() > HirsCapacity_) {
-            const KeyType Overflow = QueueList_.back();
-            QueueList_.pop_back();
-            QueueIterators_.erase(Overflow);
-            this->Entries_[Overflow].Resident = false;
-            Result.WasEvicted = true;
-            Result.EvictedKey = Overflow;
-        }
+        Result.WasEvicted = true;
+        Result.EvictedKey = EvictedKey;
         return Result;
     }
 
-    TResult PromoteHirToLir(const KeyType& Key) {
-        RemoveFromQueueIfPresent(Key);
+    // Подрезка: снимаем дно, пока там не окажется LIR-блок. HIR-запись ниже
+    // самого старого LIR уже никогда не пройдёт тест на малый IRR честно,
+    // так что её хранение — источник ложных повышений, а не полезная история.
+    void PruneStack() {
+        while (!Stack_.empty()) {
+            const KeyType BottomKey = Stack_.back();
+            const auto It = Entries_.find(BottomKey);
 
-        this->Entries_[Key] = SLirsEntry<KeyType>{/*IsLIR=*/true, /*Resident=*/true};
-        ++LirCount_;
+            if (It->second.IsLIR)
+                break;
 
-        MoveToStackTop(Key);
+            Stack_.pop_back();
+            It->second.InStack = false;
+
+            // Нерезидент вне стека и вне очереди — след простыл, забываем.
+            if (!It->second.Resident && !It->second.InQueue)
+                Entries_.erase(It);
+        }
+    }
+
+    // --- переходы состояний ---
+
+    // Дно стека по инварианту — самый холодный LIR-блок. Разжалуем его
+    // в HIR: данные остаются, но теперь он кандидат на вылет.
+    TResult DemoteStackBottom() {
+        const KeyType VictimKey = Stack_.back();
+        const auto VictimIt = Entries_.find(VictimKey);
+
+        RemoveFromStack(VictimIt);
+        VictimIt->second.IsLIR = false;
+        --LirCount_;
+
+        // В статье разжалованный блок встаёт в конец Q, то есть в позицию
+        // максимальной защиты. У нас жертва берётся с хвоста, значит это голова.
+        PushToQueueFront(VictimIt, VictimKey);
 
         TResult Result;
-        if (LirCount_ > LirsCapacity_) {
-            Result = DemoteStackBottomLirToHir();
-        }
+        if (QueueList_.size() > HirsCapacity_)
+            Result = EvictQueueTail();
+        return Result;
+    }
+
+    // Повышение до LIR. Вызывается и для резидентного HIR, найденного в S,
+    // и для призрака — разница только в том, что призраку надо выдать кадр,
+    // а кадр берётся из цепочки "демоция дна -> вытеснение хвоста Q".
+    TResult PromoteToLir(const KeyType& Key) {
+        const auto It = Entries_.find(Key);
+
+        RemoveFromQueueIfPresent(It);
+        MoveToStackTop(Key);
+
+        It->second.IsLIR    = true;
+        It->second.Resident = true;
+        ++LirCount_;
+
+        // Подрезать надо ДО выбора жертвы: MoveToStackTop мог снять блок
+        // со дна, и без подрезки DemoteStackBottom разжаловал бы HIR-запись,
+        // уронив LirCount_ ниже реального числа LIR-блоков.
+        PruneStack();
+
+        TResult Result;
+        if (LirCount_ > LirsCapacity_)
+            Result = DemoteStackBottom();
+
         PruneStack();
         return Result;
     }
 
     TResult InsertBrandNewKey(const KeyType& Key) {
+        auto [It, bInserted] = Entries_.try_emplace(Key);
+        It->second.Resident = true;
+
         TResult Result;
         if (LirCount_ < LirsCapacity_) {
-            this->Entries_[Key] = SLirsEntry<KeyType>{/*IsLIR=*/true, /*Resident=*/true};
+            // Прогрев: пока LIR-множество не заполнено, новые блоки попадают
+            // туда сразу — конкурировать всё равно не с кем.
+            It->second.IsLIR = true;
             ++LirCount_;
-            MoveToStackTop(Key);
+            PushToStackTop(It, Key);
         } else {
-            this->Entries_[Key] = SLirsEntry<KeyType>{/*IsLIR=*/false, /*Resident=*/true};
-            MoveToStackTop(Key);
-            QueueList_.push_front(Key);
-            QueueIterators_[Key] = QueueList_.begin();
-
-            if (QueueList_.size() > HirsCapacity_) {
-                const KeyType Overflow = QueueList_.back();
-                QueueList_.pop_back();
-                QueueIterators_.erase(Overflow);
-                this->Entries_[Overflow].Resident = false;
-                Result.WasEvicted = true;
-                Result.EvictedKey = Overflow;
-            }
+            PushToStackTop(It, Key);
+            PushToQueueFront(It, Key);
+            if (QueueList_.size() > HirsCapacity_)
+                Result = EvictQueueTail();
         }
+
         PruneStack();
         return Result;
     }
-
-    std::size_t LirsCapacity_ = 0;
-    std::size_t HirsCapacity_ = 0;
-    std::size_t LirCount_ = 0;
-    bool bSingleSlotMode_ = false;
-
-    std::list<KeyType> Stack_;
-    std::unordered_map<KeyType, typename std::list<KeyType>::iterator> StackIterators_;
-
-    std::list<KeyType> QueueList_;
-    std::unordered_map<KeyType, typename std::list<KeyType>::iterator> QueueIterators_;
 };

@@ -30,10 +30,10 @@ struct SArcEntry {
 // оригинальной статьи Megiddo & Modha, "ARC: A Self-Tuning, Low
 // Overhead Replacement Cache" (FAST 2003).
 template <typename KeyType>
-class TArcCache : public TCacheLevelBase<KeyType, SArcEntry<KeyType>> {
+class TArcCache : public TCacheLevelBase<KeyType> {
 public:
     explicit TArcCache(std::size_t Capacity)
-        : TCacheLevelBase<KeyType, SArcEntry<KeyType>>(ECacheAlgorithm::Arc, Capacity) {}
+        : TCacheLevelBase<KeyType>(ECacheAlgorithm::Arc, Capacity) {}
 
     SCacheEviction<KeyType> Insert(const KeyType& Key) {
         const auto FoundIt = this->Entries_.find(Key);
@@ -56,9 +56,9 @@ public:
     }
 
 private:
-    using TBase   = TCacheLevelBase<KeyType, SArcEntry<KeyType>>;
-    using TResult = typename TBase::TResult;
-    using TEntryIt = typename TBase::TEntryIt;
+    using TBase    = TCacheLevelBase<KeyType>;
+    using TResult  = SCacheEviction<KeyType>;
+    using TEntryIt = std::unordered_map<KeyType, EntryType>::iterator;
 
     void PromoteToT2Front(const KeyType& Key, TEntryIt FoundIt) {
         if (FoundIt->second.Location == EArcLocation::T1) {

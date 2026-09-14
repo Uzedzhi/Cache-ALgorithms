@@ -1,81 +1,108 @@
 #pragma once
 
+#include <cstddef>
 #include <list>
 #include <unordered_map>
 
 #include "CacheLevel.h"
 
-// Запись LFU: текущая частота обращений и позиция ключа в списке своей
-// частоты. Призрачных записей у LFU нет.
+// Запись LFU: сколько раз обращались к ключу и где он лежит в списке
+// своей частоты (итератор нужен, чтобы вынуть ключ за O(1)).
 template <typename KeyType>
 struct SLfuEntry {
-    int Frequency = 0;
+    std::size_t Frequency = 0;
     typename std::list<KeyType>::iterator PositionInFrequencyList;
-
-    bool IsResident() const { return true; }
 };
 
-// LFU с O(1) операциями (классическая схема Yang/Shao):
-// каждому ключу сопоставлена частота обращений; ключи одной частоты лежат
-// в своём списке (порядок внутри списка — recency, для tie-break при
-// вытеснении); отдельно отслеживается минимальная используемая частота,
-// чтобы не искать жертву перебором.
+// LFU с O(1) операциями (схема Shah/Mitra/Matani):
+//   - Entries_         : ключ -> {частота, позиция в списке частоты};
+//   - FrequencyToKeys_ : частота -> ключи с этой частотой, голова списка —
+//                        самый свежий, хвост — самый давний (tie-break);
+//   - MinFrequency_    : минимальная частота среди лежащих в кеше ключей,
+//                        из её списка и берётся жертва.
 template <typename KeyType>
-class TLfuCache : public TCacheLevelBase<KeyType, SLfuEntry<KeyType>> {
+class TLfuCache : public TCacheLevelBase<KeyType> {
 public:
     explicit TLfuCache(std::size_t Capacity)
-        : TCacheLevelBase<KeyType, SLfuEntry<KeyType>>(ECacheAlgorithm::Lfu, Capacity) {}
+        : TCacheLevelBase<KeyType>(ECacheAlgorithm::Lfu, Capacity) {}
 
+    // Хит — ключ сейчас лежит в кеше.
+    bool Contains(const KeyType& Key) const {
+        return Entries_.find(Key) != Entries_.end();
+    }
+
+    // Обращение к Key: при хите повышает частоту, при промахе вставляет
+    // ключ (вытеснив наименее часто используемый, если кеш полон).
     SCacheEviction<KeyType> Insert(const KeyType& Key) {
+        const auto FoundIt = Entries_.find(Key);
+        if (FoundIt != Entries_.end()) {
+            IncrementFrequency(FoundIt);
+            return {};
+        }
+
         SCacheEviction<KeyType> Result;
-
-        const auto FoundIt = this->Entries_.find(Key);
-        if (FoundIt != this->Entries_.end()) {
-            Touch(FoundIt);
-            return Result;
+        if (Entries_.size() >= this->Capacity_) {
+            Result = EvictLeastFrequent();
         }
-
-        if (this->Entries_.size() >= this->Capacity_) {
-            auto& VictimList = FrequencyToKeys_[MinFrequency_];
-            const KeyType VictimKey = VictimList.back();
-            VictimList.pop_back();
-            if (VictimList.empty()) {
-                FrequencyToKeys_.erase(MinFrequency_);
-            }
-            this->Entries_.erase(VictimKey);
-
-            Result.WasEvicted = true;
-            Result.EvictedKey = VictimKey;
-        }
-
-        FrequencyToKeys_[1].push_front(Key);
-        this->Entries_[Key] = SLfuEntry<KeyType>{1, FrequencyToKeys_[1].begin()};
-        MinFrequency_ = 1;
+        AddNewKey(Key);
         return Result;
     }
 
 private:
-    using TEntryIt = typename TCacheLevelBase<KeyType, SLfuEntry<KeyType>>::TEntryIt;
+    using TKeyList = std::list<KeyType>;
+    using TEntryIt = typename std::unordered_map<KeyType, SLfuEntry<KeyType>>::iterator;
 
-    void Touch(TEntryIt NodeIt) {
-        const KeyType Key = NodeIt->first;
-        const int OldFrequency = NodeIt->second.Frequency;
-        const int NewFrequency = OldFrequency + 1;
+    // Переносит ключ из списка частоты F в голову списка F+1.
+    // splice не копирует узел, поэтому сохранённый итератор остаётся валидным.
+    void IncrementFrequency(TEntryIt EntryIt) {
+        SLfuEntry<KeyType>& Entry = EntryIt->second;
+        const std::size_t OldFrequency = Entry.Frequency;
+        const std::size_t NewFrequency = OldFrequency + 1;
 
-        auto& OldList = FrequencyToKeys_[OldFrequency];
-        OldList.erase(NodeIt->second.PositionInFrequencyList);
+        // Ссылки на значения unordered_map переживают рехеш, так что
+        // обращение к NewList (возможная вставка) не портит OldList.
+        TKeyList& NewList = FrequencyToKeys_[NewFrequency];
+        TKeyList& OldList = FrequencyToKeys_[OldFrequency];
+        NewList.splice(NewList.begin(), OldList, Entry.PositionInFrequencyList);
+        Entry.Frequency = NewFrequency;
+
+        // Пустые списки не храним; если опустел минимальный — минимум сдвигается на +1.
         if (OldList.empty()) {
             FrequencyToKeys_.erase(OldFrequency);
             if (MinFrequency_ == OldFrequency) {
                 MinFrequency_ = NewFrequency;
             }
         }
-
-        FrequencyToKeys_[NewFrequency].push_front(Key);
-        NodeIt->second.Frequency = NewFrequency;
-        NodeIt->second.PositionInFrequencyList = FrequencyToKeys_[NewFrequency].begin();
     }
 
-    int MinFrequency_ = 0;
-    std::unordered_map<int, std::list<KeyType>> FrequencyToKeys_;
+    // Выкидывает самый давний ключ среди ключей с минимальной частотой.
+    SCacheEviction<KeyType> EvictLeastFrequent() {
+        const auto MinListIt = FrequencyToKeys_.find(MinFrequency_);
+        CHECK(MinListIt != FrequencyToKeys_.end() && !MinListIt->second.empty(),
+              "TLfuCache: нарушен инвариант — нет списка минимальной частоты.");
+
+        TKeyList& VictimList = MinListIt->second;
+        SCacheEviction<KeyType> Result;
+        Result.WasEvicted = true;
+        Result.EvictedKey = VictimList.back();
+
+        VictimList.pop_back();
+        if (VictimList.empty()) {
+            FrequencyToKeys_.erase(MinListIt);
+        }
+        Entries_.erase(Result.EvictedKey);
+        return Result;
+    }
+
+    // Новый ключ всегда получает частоту 1, значит минимум становится 1.
+    void AddNewKey(const KeyType& Key) {
+        TKeyList& FirstList = FrequencyToKeys_[1];
+        FirstList.push_front(Key);
+        Entries_[Key] = SLfuEntry<KeyType>{1, FirstList.begin()};
+        MinFrequency_ = 1;
+    }
+
+    std::size_t MinFrequency_ = 0;
+    std::unordered_map<std::size_t, TKeyList> FrequencyToKeys_;
+    std::unordered_map<KeyType, SLfuEntry<KeyType>> Entries_;
 };
