@@ -2,10 +2,8 @@
 
 #include <list>
 #include <unordered_map>
-#include <vector>
 
 #include "CacheLevel.h"
-#include "CacheTypes.h"
 
 // // Запись LRU: только позиция ключа в списке давности. Призрачных записей
 // // у LRU нет — всё, что лежит в таблице, резидентно.
@@ -22,18 +20,21 @@
 // список хранит порядок использования (голова — самый свежий элемент),
 // хеш-таблица базы даёт O(1) доступ к итератору элемента в списке.
 template <typename KeyType>
-class TLruCache : public TCacheLevelBase<KeyType> {
+class TLruCache {
+    using Eviction = SCacheEviction<KeyType>;
+    std::unordered_map<KeyType, std::list<int>::iterator> Entries_;
+    std::list<int> RecencyList_;
+    std::size_t Capacity_;
 public:
-    explicit TLruCache(std::size_t Capacity)
-        : TCacheLevelBase<KeyType>(ECacheAlgorithm::Lru, Capacity) {}
+    explicit TLruCache(std::size_t Capacity) : Capacity_(Capacity) {}
 
     bool Contains(const KeyType& Key) const {
         const auto FoundEl = Entries_.find(Key);
         return FoundEl != Entries_.end();
     }
 
-    SCacheEviction<KeyType> Insert(const KeyType& Key) {
-        SCacheEviction<KeyType> Result{};
+    Eviction Insert(const KeyType& Key) {
+        Eviction Result{};
         const auto FoundIt = Entries_.find(Key);
 
         if (FoundIt != Entries_.end()) {
@@ -54,9 +55,4 @@ public:
         Entries_[Key] = RecencyList_.begin();
         return Result;
     }
-
-private:
-    // каждому ключу соответствует его позиция в списке на вытеснение
-    std::unordered_map<KeyType, std::list<int>::iterator> Entries_;
-    std::list<int> RecencyList_;
 };

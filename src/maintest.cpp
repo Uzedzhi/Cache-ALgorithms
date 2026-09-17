@@ -8,7 +8,6 @@
 #include "../include/MultiLevelCache.h"
 
 using KeyType = int;
-
 void PrintResults(const TCacheRealHierarchy<KeyType>&  RealCacheHierarchy,
                   const TCacheIdealHierarchy<KeyType>& IdealCacheHierarchy,
                   const std::vector<SCacheLevelConfig> LevelConfigs) {

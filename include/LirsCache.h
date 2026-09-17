@@ -3,9 +3,9 @@
 #include <algorithm>
 #include <cassert>
 #include <list>
-#include <stdexcept>
 #include <unordered_map>
 
+#include "../MyCppLibs/sassert.h"
 #include "CacheLevel.h"
 
 // Запись LIRS. "Призрачность" тут не позиция в списке, а флаг Resident:
@@ -28,26 +28,9 @@ struct SLirsEntry {
     typename std::list<KeyType>::iterator StackPos;
 };
 
-// LIRS — использует межпосещенческую близость (IRR, Inter-Reference
-// Recency) вместо простой хронологии обращений. Все замеченные ключи
-// делятся на:
-//   LIR (Low IRR) — "элитные", всегда резидентные, их LirsCapacity_ максимум;
-//   HIR (High IRR) — обычные; резидентными могут быть лишь HirsCapacity_ штук,
-//                    остальные HIR помнятся как "история" в стеке S.
-// Структуры:
-//   S — стек recency-истории (и LIR, и HIR, резидентные и нет). Голова списка
-//       это вершина стека (самое свежее), хвост — дно (самое старое).
-//       Инвариант: на дне всегда LIR-блок, что и обеспечивает подрезка.
-//       Именно этот инвариант превращает проверку "ключ лежит в S"
-//       в сравнение его IRR с порогом — числа IRR нигде не хранятся.
-//   Q — очередь резидентных HIR-блоков. Голова — самый свежий,
-//       хвост — жертва.
-// Реализация — переложение алгоритма из статьи Jiang & Zhang,
-// "LIRS: An Efficient Low Inter-reference Recency Set Replacement
-// Policy" (SIGMETRICS 2002).
 template <typename KeyType>
-class TLirsCache : public TCacheLevelBase<KeyType> {
-    using TResult = SCacheEviction<KeyType>;
+class TLirsCache {
+    using Eviction = SCacheEviction<KeyType>;
     using TMap    = typename std::unordered_map<KeyType, SLirsEntry<KeyType>>;
 
     TMap Entries_;
@@ -58,17 +41,13 @@ class TLirsCache : public TCacheLevelBase<KeyType> {
 
     std::list<KeyType> Stack_;
     std::list<KeyType> QueueList_;
+    std::size_t Capacity_;
 
 public:
-    explicit TLirsCache(std::size_t Capacity)
-        : TCacheLevelBase<KeyType>(ECacheAlgorithm::Lirs, Capacity) {
-        CHECK_EX(Capacity >= 3, std::invalid_argument, "Ошибка создания LIRS кеша: "
-                                                       "нельзя создать кеш с емкостью меньше 3");
+    explicit TLirsCache(std::size_t Capacity) : Capacity_(Capacity) {
+        CHECK_EX(Capacity >= 2, std::invalid_argument, "Ошибка создания LIRS кеша: "
+                                                       "нельзя создать кеш с емкостью меньше 2");
 
-        // В статье под HIR-резидентов отводится ~1% ёмкости, но не меньше
-        // одного кадра: при HirsCapacity_ == 0 очередь вытесняла бы блок
-        // в тот же момент, когда он туда попал, и испытательного срока
-        // не существовало бы вовсе.
         HirsCapacity_ = std::max<std::size_t>(1, Capacity / 100);
         LirsCapacity_ = Capacity - HirsCapacity_;
     }
@@ -78,12 +57,12 @@ public:
         return FoundEl != Entries_.end() && FoundEl->second.Resident;
     }
 
-    SCacheEviction<KeyType> Insert(const KeyType& Key) {
+    Eviction Insert(const KeyType& Key) {
         const auto FoundIt = Entries_.find(Key);
         const bool bKeyExists   = (FoundIt != Entries_.end());
         const bool bKeyResident = bKeyExists && FoundIt->second.Resident;
 
-        TResult Result;
+        Eviction Result;
 
         if (bKeyResident && FoundIt->second.IsLIR) {
             // Случай 1: попадание в LIR. Двигаем наверх; если блок был на дне,
@@ -154,8 +133,8 @@ private:
 
     // Вытеснение хвоста очереди — единственное место во всём классе,
     // где освобождаются данные. Подрезка стека память не освобождает.
-    TResult EvictQueueTail() {
-        TResult Result;
+    Eviction EvictQueueTail() {
+        Eviction Result;
         if (QueueList_.empty())
             return Result;
 
@@ -200,7 +179,7 @@ private:
 
     // Дно стека по инварианту — самый холодный LIR-блок. Разжалуем его
     // в HIR: данные остаются, но теперь он кандидат на вылет.
-    TResult DemoteStackBottom() {
+    Eviction DemoteStackBottom() {
         const KeyType VictimKey = Stack_.back();
         const auto VictimIt = Entries_.find(VictimKey);
 
@@ -212,7 +191,7 @@ private:
         // максимальной защиты. У нас жертва берётся с хвоста, значит это голова.
         PushToQueueFront(VictimIt, VictimKey);
 
-        TResult Result;
+        Eviction Result;
         if (QueueList_.size() > HirsCapacity_)
             Result = EvictQueueTail();
         return Result;
@@ -221,7 +200,7 @@ private:
     // Повышение до LIR. Вызывается и для резидентного HIR, найденного в S,
     // и для призрака — разница только в том, что призраку надо выдать кадр,
     // а кадр берётся из цепочки "демоция дна -> вытеснение хвоста Q".
-    TResult PromoteToLir(const KeyType& Key) {
+    Eviction PromoteToLir(const KeyType& Key) {
         const auto It = Entries_.find(Key);
 
         RemoveFromQueueIfPresent(It);
@@ -236,7 +215,7 @@ private:
         // уронив LirCount_ ниже реального числа LIR-блоков.
         PruneStack();
 
-        TResult Result;
+        Eviction Result;
         if (LirCount_ > LirsCapacity_)
             Result = DemoteStackBottom();
 
@@ -244,11 +223,11 @@ private:
         return Result;
     }
 
-    TResult InsertBrandNewKey(const KeyType& Key) {
+    Eviction InsertBrandNewKey(const KeyType& Key) {
         auto [It, bInserted] = Entries_.try_emplace(Key);
         It->second.Resident = true;
 
-        TResult Result;
+        Eviction Result;
         if (LirCount_ < LirsCapacity_) {
             // Прогрев: пока LIR-множество не заполнено, новые блоки попадают
             // туда сразу — конкурировать всё равно не с кем.

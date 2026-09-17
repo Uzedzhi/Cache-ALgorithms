@@ -18,16 +18,17 @@ struct SLfuEntry {
 //   - MinFrequency_    : минимальная частота среди лежащих в кеше ключей,
 //                        из её списка и берётся жертва.
 template <typename KeyType>
-class TLfuCache : public TCacheLevelBase<KeyType> {
+class TLfuCache {
+    using Eviction = SCacheEviction<KeyType>;
     using TEntryIt = typename std::unordered_map<KeyType, SLfuEntry<KeyType>>::iterator;
     using TKeyList = typename std::list<KeyType>;
 
     std::size_t MinFrequency_ = 0;
     std::unordered_map<std::size_t, TKeyList> FrequencyToKeys_;
     std::unordered_map<KeyType, SLfuEntry<KeyType>> Entries_;
+    std::size_t Capacity_;
 public:
-    explicit TLfuCache(std::size_t Capacity)
-        : TCacheLevelBase<KeyType>(ECacheAlgorithm::Lfu, Capacity) {}
+    TLfuCache(std::size_t Capacity) : Capacity_(Capacity) {}
 
     // Хит — ключ сейчас лежит в кеше.
     bool Contains(const KeyType& Key) const {
@@ -36,15 +37,15 @@ public:
 
     // Обращение к Key: при хите повышает частоту, при промахе вставляет
     // ключ (вытеснив наименее часто используемый, если кеш полон).
-    SCacheEviction<KeyType> Insert(const KeyType& Key) {
+    Eviction Insert(const KeyType& Key) {
         const auto FoundIt = Entries_.find(Key);
         if (FoundIt != Entries_.end()) { // hit
             IncrementFrequency(FoundIt);
             return {};
         }
 
-        SCacheEviction<KeyType> Result;
-        if (Entries_.size() >= this->Capacity_) { // miss
+        Eviction Result;
+        if (Entries_.size() >= Capacity_) { // miss
             Result = EvictLeastFrequent();
         }
         AddNewKey(Key);
@@ -73,11 +74,11 @@ private:
         }
     }
 
-    SCacheEviction<KeyType> EvictLeastFrequent() {
+    Eviction EvictLeastFrequent() {
         const auto MinListIt = FrequencyToKeys_.find(MinFrequency_);
         
         TKeyList& VictimList = MinListIt->second;
-        SCacheEviction<KeyType> Result;
+        Eviction Result;
         Result.WasEvicted = true;
         Result.EvictedKey = VictimList.back();
 

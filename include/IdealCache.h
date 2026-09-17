@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cerrno>
 #include <deque>
 #include <limits>
 #include <set>
@@ -8,46 +7,23 @@
 #include <vector>
 
 #include "CacheLevel.h"
-#include "CacheTypes.h"
 
-// Запись идеального кеша: позиция ближайшего будущего обращения к ключу.
-// Призрачных записей нет — в таблице лежат только резиденты.
 struct SIdealEntry {
     std::size_t NextUse = 0;
 };
 
-// Идеальный кеш (алгоритм Белади / MIN): на каждом промахе вытесняет тот
-// резидентный ключ, который понадобится позже всех остальных (либо не
-// понадобится вообще). Это доказанно оптимальная offline-стратегия —
-// она "подглядывает" в будущее, поэтому годится только как эталон для
-// сравнения с реальными online-алгоритмами, а не как практический кеш.
-//
-// Наследуется от той же TCacheLevelBase, что и все остальные уровни, и
-// получает от неё готовые Contains()/GetCapacity()/GetAlgorithm(). Из-за
-// этого попадает в тот же std::variant (TCacheLevel) и обслуживается той
-// же парой CacheFind()/CacheInsert() (см. MultiLevelCache.h).
-//
-// Единственное отличие — непустой NotifyStreamPosition(): он перекрывает
-// (через сокрытие имени, не через virtual) пустой хук базы. Конкретный тип
-// уровня всегда известен статически, поэтому нужная версия метода
-// выбирается на этапе компиляции и никакого vtable не нужно.
-//
-// Жертва вытеснения ищется через std::set<{следующее использование, ключ}>
-// за O(log C) — "никогда больше не понадобится" кодируется как +infinity,
-// что автоматически ставит такой ключ в конец множества (самый выгодный
-// кандидат на вытеснение), без отдельного разбора случаев.
 template <typename KeyType>
-class TIdealCache : public TCacheLevelBase<KeyType> {
+class TIdealCache {
+    using Eviction = SCacheEviction<KeyType>;
     static constexpr std::size_t kNeverAgain = std::numeric_limits<std::size_t>::max();
-    std::size_t CurrentPosition_ = 0;
 
     std::set<std::pair<std::size_t, KeyType>>               OrderedByNextUse_;
     std::unordered_map<KeyType, std::deque<std::size_t>>    FutureOccurrences_;
     std::unordered_map<KeyType, SIdealEntry>                Entries_;
-    
+    std::size_t Capacity_;
 public:
     TIdealCache(std::size_t Capacity, const std::vector<KeyType>& DataStream)
-        : TCacheLevelBase<KeyType>(ECacheAlgorithm::Ideal, Capacity) {
+        : Capacity_(Capacity) {
         for (std::size_t Index = 0; Index < DataStream.size(); ++Index) {
             FutureOccurrences_[DataStream[Index]].push_back(Index);
         }
@@ -57,13 +33,13 @@ public:
         return Entries_.find(Key) != Entries_.end();
     }
 
-    SCacheEviction<KeyType> Insert(const KeyType& Key) {
-        SCacheEviction<KeyType> Result;
+    Eviction Insert(const KeyType& Key, std::size_t Position) {
+        Eviction Result;
 
         // Текущее обращение "потребляет" ближайшее известное вхождение
         // этого ключа — дальше для него актуальны только будущие позиции.
         auto& OwnFutureUses = FutureOccurrences_[Key];
-        if (!OwnFutureUses.empty() && OwnFutureUses.front() <= CurrentPosition_)
+        if (!OwnFutureUses.empty() && OwnFutureUses.front() <= Position)
             OwnFutureUses.pop_front();
 
         const std::size_t NewNextUse = OwnFutureUses.empty() ? kNeverAgain : OwnFutureUses.front();
@@ -92,9 +68,5 @@ public:
         Entries_[Key] = SIdealEntry{NewNextUse};
         OrderedByNextUse_.insert({NewNextUse, Key});
         return Result;
-    }
-
-    void NotifyStreamPosition(std::size_t CurrentPosition) {
-        CurrentPosition_ = CurrentPosition;
     }
 };

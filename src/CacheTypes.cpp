@@ -5,47 +5,47 @@
 #include <cstdint>
 #include <string_view>
 
-// FNV-1a хеш
-constexpr std::uint32_t FNV1AOffsetBasis = 2166136261u;
-constexpr std::uint32_t FNV1APrime       = 16777619u;
-
-constexpr void FNV1A_Hash_step(std::uint32_t &hash, std::uint8_t ch) {
-    hash ^= ch;
-    hash *= FNV1APrime;
-}
-
-constexpr std::uint32_t FNV1A_Hash(const char* Text) {
-    std::uint32_t Hash = FNV1AOffsetBasis;
-
-    for (; *Text != '\0'; ++Text) {
-        std::uint8_t uch8 = static_cast<std::uint8_t>(*Text);
-        FNV1A_Hash_step(Hash, uch8);
+namespace CacheTypesHash {
+    constexpr std::uint32_t FNV1AOffsetBasis = 2166136261u;
+    constexpr std::uint32_t FNV1APrime       = 16777619u;
+    constexpr void FNV1A_Hash_step(std::uint32_t &hash, std::uint8_t ch) {
+        hash ^= ch;
+        hash *= FNV1APrime;
     }
 
-    return Hash;
-}
+    constexpr std::uint32_t FNV1A_Hash(const char* Text) {
+        std::uint32_t Hash = FNV1AOffsetBasis;
 
-std::uint32_t FNV1A_HashUpperCase(std::string_view Text) {
-    std::uint32_t Hash = FNV1AOffsetBasis;
+        for (; *Text != '\0'; ++Text) {
+            std::uint8_t uch8 = static_cast<std::uint8_t>(*Text);
+            FNV1A_Hash_step(Hash, uch8);
+        }
 
-    for (char Character : Text) {
-        std::uint8_t uch8 = static_cast<std::uint8_t>(
-            std::toupper(static_cast<unsigned char>(Character)));
-        FNV1A_Hash_step(Hash, uch8);
+        return Hash;
     }
 
-    return Hash;
+    std::uint32_t FNV1A_HashUpperCase(std::string_view Text) {
+        std::uint32_t Hash = FNV1AOffsetBasis;
+
+        for (char Character : Text) {
+            std::uint8_t uch8 = static_cast<std::uint8_t>(
+                std::toupper(static_cast<unsigned char>(Character)));
+            FNV1A_Hash_step(Hash, uch8);
+        }
+
+        return Hash;
+    }
 }
 
 ECacheAlgorithm ParseCacheAlgorithm(std::string_view AlgorithmName) {
-    switch (FNV1A_HashUpperCase(AlgorithmName)) {
-        case FNV1A_Hash("LRU"):     return ECacheAlgorithm::Lru;
-        case FNV1A_Hash("LFU"):     return ECacheAlgorithm::Lfu;
-        case FNV1A_Hash("LIRS"):    return ECacheAlgorithm::Lirs;
+    switch (CacheTypesHash::FNV1A_HashUpperCase(AlgorithmName)) {
+        case CacheTypesHash::FNV1A_Hash("LRU"):     return ECacheAlgorithm::Lru;
+        case CacheTypesHash::FNV1A_Hash("LFU"):     return ECacheAlgorithm::Lfu;
+        case CacheTypesHash::FNV1A_Hash("LIRS"):    return ECacheAlgorithm::Lirs;
 
-        case FNV1A_Hash("2Q"):
-        case FNV1A_Hash("TWOQ"):
-        case FNV1A_Hash("TWO-Q"):   return ECacheAlgorithm::TwoQ;
+        case CacheTypesHash::FNV1A_Hash("2Q"):
+        case CacheTypesHash::FNV1A_Hash("TWOQ"):
+        case CacheTypesHash::FNV1A_Hash("TWO-Q"):   return ECacheAlgorithm::TwoQ;
         default:                    return ECacheAlgorithm::Unknown;
     }
 }

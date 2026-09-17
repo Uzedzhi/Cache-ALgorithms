@@ -5,4 +5,5 @@
 
 #include "CacheTypes.h"
 
-std::vector<int> ReadDataStream(std::istream& InputStream = std::cin);
+std::vector<SCacheLevelConfig> ReadCacheConfig(const std::string& ConfigFilePath);
+std::vector<int> ReadDataAndCapacities(std::vector<SCacheLevelConfig> &LevelConfigs, std::istream& InputStream = std::cin);

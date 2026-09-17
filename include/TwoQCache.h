@@ -1,15 +1,13 @@
 #pragma once
 
-#include <algorithm>
 #include <list>
 #include <stdexcept>
+#include <unordered_map>
 
+#include "../MyCppLibs/sassert.h"
 #include "CacheLevel.h"
 
-// В какой из трёх областей 2Q сейчас числится ключ.
-// A1in/Am — резидентные, A1out — призрачная (только имя ключа).
 enum class ETwoQLocation { A1in, A1out, Am };
-
 template <typename KeyType>
 struct STwoQEntry {
     ETwoQLocation Location = ETwoQLocation::A1in;
@@ -20,18 +18,9 @@ struct STwoQEntry {
     }
 };
 
-// 2Q (Johnson & Shasha, 1994) — три структуры:
-//   A1in  — FIFO-очередь "новичков", ещё не доказавших повторную полезность;
-//   A1out — призрачная FIFO-очередь ключей, вытесненных из A1in (без данных);
-//   Am    — основная LRU-область для ключей, к которым уже было повторное
-//           обращение (либо напрямую в Am, либо через ghost-hit в A1out).
-// Идея: единственное обращение к странице не должно "засорять" основной
-// LRU-кеш (в отличие от чистого LRU, где даже одноразовые сканы вытесняют
-// полезные данные) — оно оседает в маленькой A1in, и только вторичное
-// обращение поднимает ключ в Am.
 template <typename KeyType>
-class TTwoQCache : public TCacheLevelBase<KeyType> {
-    using TResult  = SCacheEviction<KeyType>;
+class TTwoQCache {
+    using Eviction  = SCacheEviction<KeyType>;
     using TMap     = std::unordered_map<KeyType, STwoQEntry<KeyType>>;
     TMap Entries_;
 
@@ -42,11 +31,11 @@ class TTwoQCache : public TCacheLevelBase<KeyType> {
     std::list<KeyType> A1inList_;
     std::list<KeyType> A1outList_;
     std::list<KeyType> AmList_;
+    std::size_t Capacity_;
 public:
-    explicit TTwoQCache(std::size_t Capacity)
-        : TCacheLevelBase<KeyType>(ECacheAlgorithm::TwoQ, Capacity) {
-        CHECK_EX(Capacity >= 4, std::invalid_argument,  "Ошибка создания 2Q кеша: " 
-                                                        "нельзя создать кеш с емкостью меньше 4");
+    explicit TTwoQCache(std::size_t Capacity) : Capacity_(Capacity) {
+        CHECK_EX(Capacity >= 2, std::invalid_argument,  "Ошибка создания 2Q кеша: " 
+                                                        "нельзя создать кеш с емкостью меньше 2");
 
         A1inCapacity_  = Capacity / 4;
         A1outCapacity_ = Capacity / 2;
@@ -58,7 +47,7 @@ public:
         return FoundEl != Entries_.end() && FoundEl->second.Location != ETwoQLocation::A1out;
     }
 
-    TResult Insert(const KeyType& Key) {
+    Eviction Insert(const KeyType& Key) {
         auto FoundIt = Entries_.find(Key);
 
         // miss
@@ -83,15 +72,15 @@ public:
     }
 
 private:
-    TResult PromoteFromOutToAm(const KeyType& Key, typename TMap::iterator FoundIt) {
+    Eviction PromoteFromOutToAm(const KeyType& Key, typename TMap::iterator FoundIt) {
         A1outList_.erase(FoundIt->second.Position);
         Entries_.erase(FoundIt);
 
         return InsertIntoMainArea(Key);
     }
 
-    TResult InsertIntoMainArea(const KeyType& Key) {
-        TResult Result{};
+    Eviction InsertIntoMainArea(const KeyType& Key) {
+        Eviction Result{};
         AmList_.push_front(Key);
         Entries_[Key] = STwoQEntry<KeyType>{ETwoQLocation::Am, AmList_.begin()};
 
@@ -105,8 +94,8 @@ private:
         return Result;
     }
 
-    TResult InsertNewKey(const KeyType& Key) {
-        TResult Result{};
+    Eviction InsertNewKey(const KeyType& Key) {
+        Eviction Result{};
         A1inList_.push_front(Key);
         Entries_[Key] = STwoQEntry<KeyType>{ETwoQLocation::A1in, A1inList_.begin()};
 
