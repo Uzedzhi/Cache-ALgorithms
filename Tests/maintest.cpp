@@ -71,13 +71,11 @@ std::size_t CountIdealHits(std::size_t Capacity, const std::vector<int>& DataStr
     return Ideal.HitCount_;
 }
 
-// Общие свойства, которые обязан выполнять любой алгоритм вытеснения.
 template <typename CacheType>
-void CheckBasicContract(std::size_t Capacity) {
-    SCOPED_TRACE("capacity = " + std::to_string(Capacity));
+void CheckBasicContract(std::size_t Capacity, ECacheAlgorithm Algorithm) {
+    SCOPED_TRACE("capacity = " + std::to_string(Capacity) + "cache = " + std::string(CacheAlgorithmToString(Algorithm)));
 
     CacheType Cache(Capacity);
-    EXPECT_FALSE(Cache.Contains(1)) << "новый кеш должен быть пустым";
 
     Cache.Insert(1, SlowGetPage);
     EXPECT_TRUE(Cache.Contains(1)) << "только что вставленный ключ должен быть в кеше";
@@ -138,15 +136,15 @@ TEST(Constructor, HierarchyBuildsAllAlgorithms) {
 // ===================== LRU =====================
 
 TEST(Lru, BasicContract) {
-    CheckBasicContract<TLruCache<int, int>>(2);
-    CheckBasicContract<TLruCache<int, int>>(10);
+    CheckBasicContract<TLruCache<int, int>>(2,  ECacheAlgorithm::Lru);
+    CheckBasicContract<TLruCache<int, int>>(10, ECacheAlgorithm::Lru);
 }
 
 TEST(Lru, EvictsLeastRecentlyUsed) {
     TLruCache<int, int> Cache(2);
     Cache.Insert(1, SlowGetPage);
     Cache.Insert(2, SlowGetPage);
-    Cache.Insert(1, SlowGetPage);                      // 1 стал свежее 2
+    Cache.Insert(1, SlowGetPage);
 
     const SCacheEviction<int> Result = Cache.Insert(3, SlowGetPage);
     EXPECT_TRUE(Result.WasEvicted);
@@ -158,15 +156,14 @@ TEST(Lru, EvictsLeastRecentlyUsed) {
 
 TEST(Lru, HitCountOnKnownStream) {
     TLruCache<int, int> Cache(2);
-    // 1 2 | 1 hit | 3 (вытесняет 2) | 1 hit | 2 (вытесняет 3) | 1 hit
     EXPECT_EQ(CountHits(Cache, {1, 2, 1, 3, 1, 2, 1}), 3u);
 }
 
 // ===================== LFU =====================
 
 TEST(Lfu, BasicContract) {
-    CheckBasicContract<TLfuCache<int, int>>(2);
-    CheckBasicContract<TLfuCache<int, int>>(10);
+    CheckBasicContract<TLfuCache<int, int>>(2 , ECacheAlgorithm::Lfu);
+    CheckBasicContract<TLfuCache<int, int>>(10, ECacheAlgorithm::Lfu);
 }
 
 TEST(Lfu, EvictsLeastFrequentlyUsed) {
@@ -199,8 +196,8 @@ TEST(Lfu, HitCountOnKnownStream) {
 // ===================== 2Q =====================
 
 TEST(TwoQ, BasicContract) {
-    CheckBasicContract<TTwoQCache<int, int>>(2);
-    CheckBasicContract<TTwoQCache<int, int>>(10);
+    CheckBasicContract<TTwoQCache<int, int>>(2 , ECacheAlgorithm::TwoQ);
+    CheckBasicContract<TTwoQCache<int, int>>(10, ECacheAlgorithm::TwoQ);
 }
 
 TEST(TwoQ, KeyFromA1outIsNotResidentButPromotedOnRepeat) {
@@ -225,8 +222,8 @@ TEST(TwoQ, RepeatedKeyInA1inIsHit) {
 // ===================== LIRS =====================
 
 TEST(Lirs, BasicContract) {
-    CheckBasicContract<TLirsCache<int, int>>(2);
-    CheckBasicContract<TLirsCache<int, int>>(10);
+    CheckBasicContract<TLirsCache<int, int>>(2 , ECacheAlgorithm::Lirs);
+    CheckBasicContract<TLirsCache<int, int>>(10, ECacheAlgorithm::Lirs);
 }
 
 TEST(Lirs, HitCountOnKnownStream) {

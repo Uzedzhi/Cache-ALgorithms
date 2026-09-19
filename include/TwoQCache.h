@@ -41,7 +41,7 @@ public:
         CHECK_EX(Capacity >= 2, std::invalid_argument,  "Ошибка создания 2Q кеша: " 
                                                         "нельзя создать кеш с емкостью меньше 2");
 
-        A1inCapacity_  = Capacity / 4;
+        A1inCapacity_  = std::max<int>(1, Capacity / 4);
         A1outCapacity_ = Capacity / 2;
         AmCapacity_    = Capacity - A1inCapacity_ - A1outCapacity_;
     }
