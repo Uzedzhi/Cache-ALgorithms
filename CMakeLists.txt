@@ -14,11 +14,10 @@ target_include_directories(lclib PUBLIC "include")
 add_executable(cache_sim src/main.cpp)
 target_link_libraries(cache_sim lclib)
 
-# тесты: build/maintest или ctest --test-dir build
 enable_testing()
 find_package(GTest REQUIRED)
 include(GoogleTest)
 
-add_executable(maintest Tests/maintest.cpp)
+add_executable(maintest src/maintest.cpp)
 target_link_libraries(maintest lclib GTest::gtest_main)
 gtest_discover_tests(maintest)
