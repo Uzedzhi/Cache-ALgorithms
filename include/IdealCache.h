@@ -5,21 +5,23 @@
 #include <set>
 #include <unordered_map>
 #include <vector>
+#include <optional>
 
 #include "CacheLevel.h"
 
-struct SIdealEntry {
+template <typename PageType> struct SIdealEntry {
     std::size_t NextUse = 0;
+    std::optional<PageType> Page = std::nullopt;
 };
 
-template <typename KeyType>
+template <typename KeyType, typename PageType>
 class TIdealCache {
     using Eviction = SCacheEviction<KeyType>;
     static constexpr std::size_t kNeverAgain = std::numeric_limits<std::size_t>::max();
 
     std::set<std::pair<std::size_t, KeyType>>               OrderedByNextUse_;
     std::unordered_map<KeyType, std::deque<std::size_t>>    FutureOccurrences_;
-    std::unordered_map<KeyType, SIdealEntry>                Entries_;
+    std::unordered_map<KeyType, SIdealEntry<PageType>>      Entries_;
     std::size_t Capacity_;
 public:
     TIdealCache(std::size_t Capacity, const std::vector<KeyType>& DataStream)
@@ -33,24 +35,22 @@ public:
         return Entries_.find(Key) != Entries_.end();
     }
 
-    Eviction Insert(const KeyType& Key, std::size_t Position) {
+    template <typename F> Eviction Insert(const KeyType& Key, std::size_t Position, F SlowGetPage) {
         Eviction Result;
-
-        // Текущее обращение "потребляет" ближайшее известное вхождение
-        // этого ключа — дальше для него актуальны только будущие позиции.
         auto& OwnFutureUses = FutureOccurrences_[Key];
         if (!OwnFutureUses.empty() && OwnFutureUses.front() <= Position)
             OwnFutureUses.pop_front();
 
         const std::size_t NewNextUse = OwnFutureUses.empty() ? kNeverAgain : OwnFutureUses.front();
         const auto FoundIt = Entries_.find(Key);
-        if (FoundIt != Entries_.end()) {
+        if (FoundIt != Entries_.end()) { // hit
             OrderedByNextUse_.erase({FoundIt->second.NextUse, Key});
             OrderedByNextUse_.insert({NewNextUse, Key});
             FoundIt->second.NextUse = NewNextUse;
             return Result;
         }
 
+        // miss
         if (Entries_.size() >= this->Capacity_) {
             const auto VictimIt = std::prev(OrderedByNextUse_.end());
             if (VictimIt->first <= NewNextUse) {
@@ -65,7 +65,7 @@ public:
             Result.EvictedKey = VictimKey;
         }
 
-        Entries_[Key] = SIdealEntry{NewNextUse};
+        Entries_[Key] = SIdealEntry<PageType>{NewNextUse, SlowGetPage(Key)};
         OrderedByNextUse_.insert({NewNextUse, Key});
         return Result;
     }

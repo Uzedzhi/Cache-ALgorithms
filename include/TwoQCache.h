@@ -2,13 +2,14 @@
 
 #include <list>
 #include <stdexcept>
+#include <optional>
 #include <unordered_map>
 
 #include "../MyCppLibs/sassert.h"
 #include "CacheLevel.h"
 
 enum class ETwoQLocation { A1in, A1out, Am };
-template <typename KeyType>
+template <typename KeyType, typename PageType>
 struct STwoQEntry {
     ETwoQLocation Location = ETwoQLocation::A1in;
     typename std::list<KeyType>::iterator Position;
@@ -16,12 +17,15 @@ struct STwoQEntry {
     bool IsResident() const {
         return Location == ETwoQLocation::A1in || Location == ETwoQLocation::Am;
     }
+
+    std::optional<PageType> Page = std::nullopt;
 };
 
-template <typename KeyType>
+template <typename KeyType, typename PageType>
 class TTwoQCache {
-    using Eviction  = SCacheEviction<KeyType>;
-    using TMap     = std::unordered_map<KeyType, STwoQEntry<KeyType>>;
+    using TEntry   = STwoQEntry<KeyType, PageType>;
+    using Eviction = SCacheEviction<KeyType>;
+    using TMap     = std::unordered_map<KeyType, TEntry>;
     TMap Entries_;
 
     std::size_t A1inCapacity_   = 0;
@@ -47,12 +51,12 @@ public:
         return FoundEl != Entries_.end() && FoundEl->second.Location != ETwoQLocation::A1out;
     }
 
-    Eviction Insert(const KeyType& Key) {
+    template <typename F> Eviction Insert(const KeyType& Key, F SlowGetPage) {
         auto FoundIt = Entries_.find(Key);
 
         // miss
         if (FoundIt == Entries_.end()) {
-            return InsertNewKey(Key);
+            return InsertNewKey(Key, SlowGetPage);
         }
 
         // hit
@@ -66,23 +70,24 @@ public:
                 return {};
             // если из A1out, то он доказал свою полезности и повышается в Am
             case ETwoQLocation::A1out:
-                return PromoteFromOutToAm(Key, FoundIt);
+                return PromoteFromOutToAm(Key, FoundIt, SlowGetPage);
         }
         return {};
     }
 
 private:
-    Eviction PromoteFromOutToAm(const KeyType& Key, typename TMap::iterator FoundIt) {
+    template <typename F>
+    Eviction PromoteFromOutToAm(const KeyType& Key, typename TMap::iterator FoundIt, F SlowGetPage) {
         A1outList_.erase(FoundIt->second.Position);
         Entries_.erase(FoundIt);
 
-        return InsertIntoMainArea(Key);
+        return InsertIntoMainArea(Key, SlowGetPage);
     }
 
-    Eviction InsertIntoMainArea(const KeyType& Key) {
+    template <typename F> Eviction InsertIntoMainArea(const KeyType& Key, F SlowGetPage) {
         Eviction Result{};
         AmList_.push_front(Key);
-        Entries_[Key] = STwoQEntry<KeyType>{ETwoQLocation::Am, AmList_.begin()};
+        Entries_[Key] = TEntry{ETwoQLocation::Am, AmList_.begin(), SlowGetPage(Key)};
 
         if (AmList_.size() > AmCapacity_) {
             const KeyType Victim = AmList_.back();
@@ -94,28 +99,28 @@ private:
         return Result;
     }
 
-    Eviction InsertNewKey(const KeyType& Key) {
+    template <typename F> Eviction InsertNewKey(const KeyType& Key, F SlowGetPage) {
         Eviction Result{};
         A1inList_.push_front(Key);
-        Entries_[Key] = STwoQEntry<KeyType>{ETwoQLocation::A1in, A1inList_.begin()};
+        Entries_[Key] = TEntry{ETwoQLocation::A1in, A1inList_.begin(), SlowGetPage(Key)};
 
         if (A1inList_.size() > A1inCapacity_) {
             const KeyType EvictedKey = A1inList_.back();
-            A1inList_.pop_back();
+            auto VictimIt = Entries_.find(EvictedKey);
 
-            // Данные реально покидают резидентный кеш — это настоящее
-            // вытеснение, которое должно каскадом уйти на следующий уровень.
-            Result.WasEvicted = true;
-            Result.EvictedKey = EvictedKey;
-
-            A1outList_.push_front(EvictedKey);
-            Entries_[EvictedKey] = STwoQEntry<KeyType>{ETwoQLocation::A1out, A1outList_.begin()};
-
+            VictimIt->second.Location = ETwoQLocation::A1out;
+            VictimIt->second.Page.reset(); // A1out хранит только историю, не данные
+            A1outList_.splice(A1outList_.begin(), A1inList_, VictimIt->second.Position);
+            
             if (A1outList_.size() > A1outCapacity_) {
                 const KeyType GhostDrop = A1outList_.back();
                 A1outList_.pop_back();
                 Entries_.erase(GhostDrop);
             }
+
+            Result.WasEvicted = true;
+            Result.EvictedKey = EvictedKey;
+
         }
         return Result;
     }

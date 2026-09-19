@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <list>
+#include <optional>
 #include <unordered_map>
 
 #include "../MyCppLibs/sassert.h"
@@ -17,7 +18,7 @@
 // а StackPos/QueuePos валидны ровно тогда, когда соответствующий флаг true.
 // Поэтому поля здесь нельзя перезаписывать агрегатной инициализацией —
 // это молча сбросит флаги, оставив узлы в списках.
-template <typename KeyType>
+template <typename KeyType, typename PageType>
 struct SLirsEntry {
     bool IsLIR    = false;
     bool Resident = false;
@@ -26,15 +27,16 @@ struct SLirsEntry {
 
     typename std::list<KeyType>::iterator QueuePos;
     typename std::list<KeyType>::iterator StackPos;
+
+    std::optional<PageType> Page = std::nullopt; 
 };
 
-template <typename KeyType>
+template <typename KeyType, typename PageType>
 class TLirsCache {
     using Eviction = SCacheEviction<KeyType>;
-    using TMap    = typename std::unordered_map<KeyType, SLirsEntry<KeyType>>;
+    using TMap     = typename std::unordered_map<KeyType, SLirsEntry<KeyType, PageType>>;
 
     TMap Entries_;
-
     std::size_t LirsCapacity_ = 0;
     std::size_t HirsCapacity_ = 0;
     std::size_t LirCount_     = 0;
@@ -57,13 +59,12 @@ public:
         return FoundEl != Entries_.end() && FoundEl->second.Resident;
     }
 
-    Eviction Insert(const KeyType& Key) {
-        const auto FoundIt = Entries_.find(Key);
+    template <typename F> Eviction Insert(const KeyType& Key, F SlowGetPage) {
+        const auto FoundIt      = Entries_.find(Key);
         const bool bKeyExists   = (FoundIt != Entries_.end());
         const bool bKeyResident = bKeyExists && FoundIt->second.Resident;
 
         Eviction Result;
-
         if (bKeyResident && FoundIt->second.IsLIR) {
             // Случай 1: попадание в LIR. Двигаем наверх; если блок был на дне,
             // подрезка снимет оголившийся хвост из HIR-записей.
@@ -83,16 +84,18 @@ public:
             // Случай 3: промах по нерезиденту, но призрак в S уцелел —
             // значит IRR мал, блок минует очередь и сразу становится LIR.
             Result = PromoteToLir(Key);
+            FoundIt->second.Page = SlowGetPage(Key);
         } else {
             // Случай 4: ключ неизвестен вовсе (либо призрак уже подрезан).
+            // FoundIt здесь == end(), а вставка могла сделать рехеш —
+            // берём итератор заново.
             Result = InsertBrandNewKey(Key);
+            Entries_.find(Key)->second.Page = SlowGetPage(Key);
         }
         return Result;
     }
 
 private:
-    // --- операции над списками; только они трогают флаги и итераторы ---
-
     void PushToStackTop(typename TMap::iterator It, const KeyType& Key) {
         Stack_.push_front(Key);
         It->second.StackPos = Stack_.begin();
@@ -108,8 +111,11 @@ private:
 
     void MoveToStackTop(const KeyType& Key) {
         const auto It = Entries_.find(Key);
-        RemoveFromStack(It);
-        PushToStackTop(It, Key);
+        if (!It->second.InStack) {
+            PushToStackTop(It, Key);
+            return;
+        }
+        Stack_.splice(Stack_.begin(), Stack_, It->second.StackPos);
     }
 
     void PushToQueueFront(typename TMap::iterator It, const KeyType& Key) {
@@ -131,8 +137,6 @@ private:
         PushToQueueFront(It, Key);
     }
 
-    // Вытеснение хвоста очереди — единственное место во всём классе,
-    // где освобождаются данные. Подрезка стека память не освобождает.
     Eviction EvictQueueTail() {
         Eviction Result;
         if (QueueList_.empty())
@@ -144,9 +148,8 @@ private:
         QueueList_.pop_back();
         EvictedIt->second.InQueue  = false;
         EvictedIt->second.Resident = false;
+        EvictedIt->second.Page.reset();
 
-        // Запись в S намеренно оставляем: она и есть призрак, по которому
-        // будет опознано повторное обращение.
         if (!EvictedIt->second.InStack)
             Entries_.erase(EvictedIt);
 
@@ -155,9 +158,6 @@ private:
         return Result;
     }
 
-    // Подрезка: снимаем дно, пока там не окажется LIR-блок. HIR-запись ниже
-    // самого старого LIR уже никогда не пройдёт тест на малый IRR честно,
-    // так что её хранение — источник ложных повышений, а не полезная история.
     void PruneStack() {
         while (!Stack_.empty()) {
             const KeyType BottomKey = Stack_.back();
@@ -169,16 +169,11 @@ private:
             Stack_.pop_back();
             It->second.InStack = false;
 
-            // Нерезидент вне стека и вне очереди — след простыл, забываем.
             if (!It->second.Resident && !It->second.InQueue)
                 Entries_.erase(It);
         }
     }
 
-    // --- переходы состояний ---
-
-    // Дно стека по инварианту — самый холодный LIR-блок. Разжалуем его
-    // в HIR: данные остаются, но теперь он кандидат на вылет.
     Eviction DemoteStackBottom() {
         const KeyType VictimKey = Stack_.back();
         const auto VictimIt = Entries_.find(VictimKey);
@@ -187,8 +182,6 @@ private:
         VictimIt->second.IsLIR = false;
         --LirCount_;
 
-        // В статье разжалованный блок встаёт в конец Q, то есть в позицию
-        // максимальной защиты. У нас жертва берётся с хвоста, значит это голова.
         PushToQueueFront(VictimIt, VictimKey);
 
         Eviction Result;
@@ -197,9 +190,6 @@ private:
         return Result;
     }
 
-    // Повышение до LIR. Вызывается и для резидентного HIR, найденного в S,
-    // и для призрака — разница только в том, что призраку надо выдать кадр,
-    // а кадр берётся из цепочки "демоция дна -> вытеснение хвоста Q".
     Eviction PromoteToLir(const KeyType& Key) {
         const auto It = Entries_.find(Key);
 
@@ -210,9 +200,6 @@ private:
         It->second.Resident = true;
         ++LirCount_;
 
-        // Подрезать надо ДО выбора жертвы: MoveToStackTop мог снять блок
-        // со дна, и без подрезки DemoteStackBottom разжаловал бы HIR-запись,
-        // уронив LirCount_ ниже реального числа LIR-блоков.
         PruneStack();
 
         Eviction Result;

@@ -3,13 +3,16 @@
 #include <cstddef>
 #include <list>
 #include <unordered_map>
+#include <optional>
 
 #include "CacheLevel.h"
 
-template <typename KeyType>
+template <typename KeyType, typename PageType>
 struct SLfuEntry {
     std::size_t Frequency = 0;
     typename std::list<KeyType>::iterator PositionInFrequencyList;
+    
+    std::optional<PageType> Page = std::nullopt;
 };
 
 //   - Entries_         : ключ -> {частота, позиция в списке частоты};
@@ -17,15 +20,16 @@ struct SLfuEntry {
 //                        самый свежий, хвост — самый давний (tie-break);
 //   - MinFrequency_    : минимальная частота среди лежащих в кеше ключей,
 //                        из её списка и берётся жертва.
-template <typename KeyType>
+template <typename KeyType, typename PageType>
 class TLfuCache {
     using Eviction = SCacheEviction<KeyType>;
-    using TEntryIt = typename std::unordered_map<KeyType, SLfuEntry<KeyType>>::iterator;
+    using TEntry   = SLfuEntry<KeyType, PageType>;
+    using TEntryIt = typename std::unordered_map<KeyType, SLfuEntry<KeyType, PageType>>::iterator;
     using TKeyList = typename std::list<KeyType>;
 
     std::size_t MinFrequency_ = 0;
     std::unordered_map<std::size_t, TKeyList> FrequencyToKeys_;
-    std::unordered_map<KeyType, SLfuEntry<KeyType>> Entries_;
+    std::unordered_map<KeyType, SLfuEntry<KeyType, PageType>> Entries_;
     std::size_t Capacity_;
 public:
     TLfuCache(std::size_t Capacity) : Capacity_(Capacity) {}
@@ -37,7 +41,7 @@ public:
 
     // Обращение к Key: при хите повышает частоту, при промахе вставляет
     // ключ (вытеснив наименее часто используемый, если кеш полон).
-    Eviction Insert(const KeyType& Key) {
+    template <typename F>  Eviction Insert(const KeyType& Key, F SlowGetPage) {
         const auto FoundIt = Entries_.find(Key);
         if (FoundIt != Entries_.end()) { // hit
             IncrementFrequency(FoundIt);
@@ -48,13 +52,14 @@ public:
         if (Entries_.size() >= Capacity_) { // miss
             Result = EvictLeastFrequent();
         }
-        AddNewKey(Key);
+
+        AddNewKey(Key, SlowGetPage);
         return Result;
     }
 
 private:
     void IncrementFrequency(TEntryIt FoundIt) {
-        SLfuEntry<KeyType>& Entry = FoundIt->second;
+        TEntry& Entry = FoundIt->second;
         const std::size_t OldFrequency = Entry.Frequency;
 
         // Ссылки на значения unordered_map переживают рехеш, так что
@@ -90,10 +95,11 @@ private:
         return Result;
     }
 
-    void AddNewKey(const KeyType& Key) {
+    template <typename F> void AddNewKey(const KeyType& Key, F SlowGetPage) {
         TKeyList& FirstList = FrequencyToKeys_[1];
         FirstList.push_front(Key);
-        Entries_[Key] = SLfuEntry<KeyType>{1, FirstList.begin()};
+        Entries_[Key] = TEntry{1, FirstList.begin(), SlowGetPage(Key)};
         MinFrequency_ = 1;
+
     }
 };
