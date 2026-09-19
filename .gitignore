@@ -4,3 +4,4 @@ testing
 cache_sim
 *.d
 build/
+.gitignore
