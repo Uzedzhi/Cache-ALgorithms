@@ -1,7 +1,0 @@
-.vscode/
-testing
-*.o
-cache_sim
-*.d
-build/
-.gitignore
